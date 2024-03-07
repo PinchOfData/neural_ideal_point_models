@@ -1,0 +1,15 @@
+torch
+gensim
+numpy
+matplotlib
+scikit-learn
+spacy
+pandas
+sentence-transformers
+patsy
+scipy
+wordcloud
+statsmodels
+notebook
+umap-learn
+plotly

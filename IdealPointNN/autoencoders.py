@@ -1,46 +1,28 @@
-#!/usr/bin/env python
-# -*- encoding: utf-8 -*-
-
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-class AutoEncoderMLP(nn.Module):
+class EncoderMLP(nn.Module):
     """
-    Torch implementation of an autoencoder.
-
-    The encoder and decoder are Multilayer Perceptrons defined by users.
-    Users can also specify prevalence and content covariates, as well as target labels to guide the encoding and decoding (see forward method).
+    Torch implementation of an encoder Multilayer Perceptron.
     """
-
     def __init__(
         self,
         encoder_dims=[2000, 1024, 512, 20],
         encoder_non_linear_activation="relu",
         encoder_bias=True,
-        decoder_dims=[20, 1024, 2000],
-        decoder_non_linear_activation=None,
-        decoder_bias=False,
         dropout=0.0,
     ):
-        super(AutoEncoderMLP, self).__init__()
+        super(EncoderMLP, self).__init__()
 
         self.encoder_dims = encoder_dims
         self.encoder_non_linear_activation = encoder_non_linear_activation
         self.encoder_bias = encoder_bias
-        self.decoder_dims = decoder_dims
-        self.decoder_non_linear_activation = decoder_non_linear_activation
-        self.decoder_bias = decoder_bias
         self.dropout = nn.Dropout(p=dropout)
         if encoder_non_linear_activation is not None:
             self.encoder_nonlin = {"relu": F.relu, "sigmoid": torch.sigmoid}[
                 encoder_non_linear_activation
-            ]
-        if decoder_non_linear_activation is not None:
-            self.decoder_nonlin = {"relu": F.relu, "sigmoid": torch.sigmoid}[
-                decoder_non_linear_activation
             ]
 
         self.encoder = nn.ModuleDict(
@@ -52,16 +34,7 @@ class AutoEncoderMLP(nn.Module):
             }
         )
 
-        self.decoder = nn.ModuleDict(
-            {
-                f"dec_{i}": nn.Linear(
-                    decoder_dims[i], decoder_dims[i + 1], bias=decoder_bias
-                )
-                for i in range(len(decoder_dims) - 1)
-            }
-        )
-
-    def encode(self, x):
+    def forward(self, x):
         """
         Encode the input.
         """
@@ -75,36 +48,48 @@ class AutoEncoderMLP(nn.Module):
                 hid = self.encoder_nonlin(hid)
         return hid
 
-    def decode(self, z):
+
+class DecoderMLP(nn.Module):
+    """
+    Torch implementation of a decoder Multilayer Perceptron.
+    """
+    def __init__(
+        self,
+        decoder_dims=[20, 1024, 2000],
+        decoder_non_linear_activation=None,
+        decoder_bias=False,
+        dropout=0.0,
+    ):
+        super(DecoderMLP, self).__init__()
+
+        self.decoder_dims = decoder_dims
+        self.decoder_non_linear_activation = decoder_non_linear_activation
+        self.decoder_bias = decoder_bias
+        self.dropout = nn.Dropout(p=dropout)
+        if decoder_non_linear_activation is not None:
+            self.decoder_nonlin = {"relu": F.relu, "sigmoid": torch.sigmoid}[
+                decoder_non_linear_activation
+            ]
+
+        self.decoder = nn.ModuleDict(
+            {
+                f"dec_{i}": nn.Linear(
+                    decoder_dims[i], decoder_dims[i + 1], bias=decoder_bias
+                )
+                for i in range(len(decoder_dims) - 1)
+            }
+        )
+
+    def forward(self, z):
         """
         Decode the input.
         """
         hid = z
         for i, (_, layer) in enumerate(self.decoder.items()):
-            hid = layer(hid)
+            hid = self.dropout(layer(hid))
             if (
                 i < len(self.decoder) - 1
                 and self.decoder_non_linear_activation is not None
             ):
                 hid = self.decoder_nonlin(hid)
         return hid
-
-    def forward(
-        self,
-        x,
-        prevalence_covariates,
-        content_covariates
-        ):
-        """
-        Call the encoder and decoder methods.
-        Returns the reconstructed input and the encoded input.
-        """
-        if prevalence_covariates is not None:
-            x = torch.cat((x, prevalence_covariates), 1)
-        theta = self.encode(x)
-        if content_covariates is not None:
-            theta_x = torch.cat((theta, content_covariates), 1)
-        else:
-            theta_x = theta
-        x_recon = self.decode(theta_x)
-        return x_recon, theta

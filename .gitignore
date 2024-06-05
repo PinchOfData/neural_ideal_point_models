@@ -2,3 +2,5 @@
 venv/*
 data/*
 ckpt/*
+old_stuff/*
+neural_ideal_point_models.zip

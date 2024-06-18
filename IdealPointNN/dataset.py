@@ -143,7 +143,9 @@ class IdealPointNNDataset(Dataset):
 
         elif modality == "vote":
 
-            d['M_features'] = np.array(self.df[columns])         
+            d['M_features'] = np.array(self.df[columns])    
+            d['missing_values'] = np.isnan(d['M_features'])    
+            d['M_features'] = np.nan_to_num(d['M_features'])
 
         # Extract content covariates matrix
         if content is not None:
@@ -175,6 +177,7 @@ class IdealPointNNDataset(Dataset):
 
         d = {}
 
+        d['i'] = i
         d['t'] = self.t
 
         for mod in self.modalities:
@@ -195,6 +198,7 @@ class IdealPointNNDataset(Dataset):
 
             if mod == 'vote':
                 d[mod]["M_features"] = self.data[mod]['M_features'][i]
+                d[mod]['missing_values'] = self.data[mod]['missing_values'][i]
 
             if mod == 'discrete_choice':
                 d[mod]["M_features"] = self.data[mod]['M_features'][i]

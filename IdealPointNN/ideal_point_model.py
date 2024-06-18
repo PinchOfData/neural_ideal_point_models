@@ -29,7 +29,7 @@ encoders = {
         "encoder_bias":True
     },
     "discrete_choice": {
-        "encoder_hidden_layers":[],
+        "encoder_hidden_layers":[256],
         "encoder_non_linear_activation":None,
         "encoder_bias":True
     }
@@ -77,7 +77,7 @@ class IdealPointNN:
         encoder_include_ideology_covariates=True,
         decoders=decoders,
         predictor=predictor,
-        num_epochs=10,
+        num_epochs=1000,
         num_workers=4,
         batch_size=64,
         learning_rate=1e-3,
@@ -429,33 +429,15 @@ class IdealPointNN:
             self.mmd_loss = None
             self.prediction_loss = None
 
-            self.train(train_datasets, test_datasets)
+            self.train_datasets = train_datasets
+            self.test_datasets = test_datasets
 
-    def train(self, train_datasets, test_datasets):
+            self.train()
+
+    def train(self):
         """
         Train the model.
         """
-
-        train_data_loaders = []
-        for train_data in train_datasets:
-            train_data_loader = DataLoader(
-                train_data,
-                batch_size=self.batch_size,
-                shuffle=True,
-                num_workers=self.num_workers,
-            )
-            train_data_loaders.append(train_data_loader)
-
-        if test_datasets is not None:
-            test_data_loaders = []
-            for test_data in test_datasets:
-                test_data_loader = DataLoader(
-                    test_data,
-                    batch_size=self.batch_size,
-                    shuffle=True,
-                    num_workers=self.num_workers,
-                )
-                test_data_loaders.append(test_data_loader)
 
         counter = 0
         best_loss = np.Inf
@@ -463,25 +445,47 @@ class IdealPointNN:
         self.save_model("{}/best_model.ckpt".format(self.ckpt_folder))
         
         for epoch in range(self.epochs, self.num_epochs):
+
+            train_data_loaders = []
+            for train_data in self.train_datasets:
+                train_data_loader = DataLoader(
+                    train_data,
+                    batch_size=self.batch_size,
+                    shuffle=True,
+                    num_workers=self.num_workers,
+                )
+                train_data_loaders.append(train_data_loader)
+
+            if self.test_datasets is not None:
+                test_data_loaders = []
+                for test_data in self.test_datasets:
+                    test_data_loader = DataLoader(
+                        test_data,
+                        batch_size=self.batch_size,
+                        shuffle=True,
+                        num_workers=self.num_workers,
+                    )
+                    test_data_loaders.append(test_data_loader)
+
             training_loss = self.epoch(train_data_loaders, validation=False)
 
-            if test_datasets is not None:
+            if self.test_datasets is not None:
                 validation_loss = self.epoch(test_data_loaders, validation=True)
 
             if (epoch + 1) % self.log_every_n_epochs == 0:
                 save_name = f'{self.ckpt_folder}/IdealPointNN_K{self.n_dims}_{self.predictor_type}_{time.strftime("%Y-%m-%d-%H-%M", time.localtime())}_{self.epochs+1}.ckpt'
-                self.save_model(save_name)
+                #self.save_model(save_name)
 
             if self.update_prior:
-                list_ideology_covariates = [train_data.M_ideology_covariates for train_data in train_datasets]
+                list_ideology_covariates = [train_data.M_ideology_covariates for train_data in self.train_datasets]
                 M_ideology_covariates = np.concatenate(list_ideology_covariates, axis=0)
-                ideal_points = self.get_ideal_points(train_datasets)
+                ideal_points = self.get_ideal_points(self.train_datasets)
                 self.prior.update_parameters(
                     ideal_points, M_ideology_covariates
                 )
 
             # Stopping rule for the optimization routine
-            if test_datasets is not None:
+            if self.test_datasets is not None:
                 if validation_loss + self.delta < best_loss:
                     best_loss = validation_loss
                     best_epoch = self.epochs
@@ -551,7 +555,7 @@ class IdealPointNN:
                 self.predictor.train()
 
         epochloss_lst = []
-        for data_loader in data_loaders:
+        for j,data_loader in enumerate(data_loaders):
             for iter, data in enumerate(data_loader):
 
                 t = int(data['t'][0])
@@ -559,10 +563,6 @@ class IdealPointNN:
                 # Choose at random one modality to encode in and one modality to decode in (fast)
                 enc_mod = random.choice(self.modalities)
                 dec_mod = random.choice(self.modalities) 
-
-                # Choose at random which modality to encode in and which modality to decode in (more time-consuming)
-                # l_enc_mod = random.shuffle(self.modalities)
-                # l_dec_mod = random.shuffle(self.modalities) 
 
                 if not validation:
                     self.optimizer.zero_grad()
@@ -617,15 +617,26 @@ class IdealPointNN:
                     theta = z
 
                 reconstruction_loss = 0
+
+                if 'vote' in self.modalities: # Impute missing values in the vote data
+                    x_output = data['vote']["M_features"]
+                    x_output = x_output.reshape(x_output.shape[0], -1).float()
+                    x_recon_2 = self.Decoders['vote'][t](theta)
+                    x_recon_binary = (torch.sigmoid(x_recon_2) > 0.5).float()
+                    missing_values = data['vote']['missing_values'].to(self.device)
+                    x_output_imputed = torch.where(missing_values, x_recon_binary, x_output)
+                    if validation:
+                        self.test_datasets[j].data['vote']['M_features'][data['i'].cpu()] = x_output_imputed.cpu()
+                    else:
+                        self.train_datasets[j].data['vote']['M_features'][data['i'].cpu()] = x_output_imputed.cpu()
+
                 if dec_mod == 'text':
                     x_output = data[dec_mod]["M_features"]
                     x_output = x_output.reshape(x_output.shape[0], -1)
                     x_recon = self.Decoders[dec_mod](theta)
                     reconstruction_loss = F.cross_entropy(x_recon, x_output)
                 elif dec_mod == 'vote':
-                    x_output = data[dec_mod]["M_features"]
-                    x_output = x_output.reshape(x_output.shape[0], -1).float()
-                    x_recon = self.Decoders[dec_mod][t](theta)
+                    x_recon = x_recon_2
                     criterion = nn.BCEWithLogitsLoss()
                     reconstruction_loss = criterion(x_recon, x_output)
                 elif dec_mod == 'discrete_choice':
@@ -653,7 +664,7 @@ class IdealPointNN:
                         prediction_loss = F.mse_loss(predictions, target_labels)
                 else:
                     prediction_loss = 0
-
+                
                 # Total loss
                 loss = (
                     reconstruction_loss

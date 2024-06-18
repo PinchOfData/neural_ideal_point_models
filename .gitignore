@@ -3,4 +3,6 @@ venv/*
 data/*
 ckpt/*
 old_stuff/*
+notebooks/application_us_congress_speeches.ipynb
+notebooks/application_rollcall_votes.ipynb
 neural_ideal_point_models.zip

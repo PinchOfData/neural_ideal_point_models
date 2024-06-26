@@ -212,7 +212,7 @@ class IdealPointNN:
                 blerg = train_data.data[modality].get('M_content_covariates', None)
                 if blerg is not None:
                     content_covariate_size = blerg.shape[1]
-                    self.content_colnames = train_data[modality].get('content_colnames', None)
+                    self.content_colnames = train_data.data[modality].get('content_colnames', None)
                 else:
                     content_covariate_size = 0
                 self.content_covariate_size[modality] = content_covariate_size
@@ -620,9 +620,9 @@ class IdealPointNN:
 
                 if 'vote' in self.modalities: # Impute missing values in the vote data
                     x_output = data['vote']["M_features"]
-                    x_output = x_output.reshape(x_output.shape[0], -1).float()
-                    x_recon_2 = self.Decoders['vote'][t](theta)
-                    x_recon_binary = (torch.sigmoid(x_recon_2) > 0.5).float()
+                    x_output = x_output.reshape(x_output.shape[0], -1).float().to(self.device)
+                    x_recon_2 = self.Decoders['vote'][t](z)
+                    x_recon_binary = (torch.sigmoid(x_recon_2) > 0.5).float().to(self.device)
                     missing_values = data['vote']['missing_values'].to(self.device)
                     x_output_imputed = torch.where(missing_values, x_recon_binary, x_output)
                     if validation:
@@ -652,7 +652,7 @@ class IdealPointNN:
                     N=x_input.shape[0],
                     M_prevalence_covariates=ideology_covariates
                 ).to(self.device)
-                mmd_loss = MMD(theta, theta_prior, device = self.device, kernel = 'multiscale')
+                mmd_loss = MMD(z, theta_prior, device = self.device, kernel = 'multiscale')
 
                 # Predict labels and compute prediction loss
                 if target_labels is not None:

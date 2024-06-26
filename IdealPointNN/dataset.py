@@ -18,6 +18,8 @@ class IdealPointNNDataset(Dataset):
     def __init__(
         self,
         df,
+        time_col=None,
+        time_value=None,
         ideology=None,
         prediction=None,
         labels=None,
@@ -36,6 +38,8 @@ class IdealPointNNDataset(Dataset):
 
         # Basic params and formulas
         self.modalities = None
+        self.time_col = time_col
+        self.time_value = time_value
         self.ideology = ideology
         self.prediction = prediction
         self.labels = labels
@@ -69,14 +73,27 @@ class IdealPointNNDataset(Dataset):
 
         self.modalities = None
 
-        self.df = df
+        if time_col is not None:
+            self.df = df[df[time_col] == time_value].reset_index()
+            if ideology is not None:
+                self.M_ideology_covariates = self.M_ideology_covariates[df[time_col] == time_value]
+            if prediction is not None:
+                self.M_prediction = self.M_prediction[df[time_col] == time_value]
+            if labels is not None:
+                self.M_labels = self.M_labels[df[time_col] == time_value]
+        else:
+            self.df = df
 
-        self.t = 1
+        if time_value is None:
+            self.t = 1
+        else:
+            self.t = time_value
 
         self.data = {}
 
     def add_modality(
         self,
+        df,
         modality='text', 
         columns=None,
         content=None,
@@ -107,10 +124,10 @@ class IdealPointNNDataset(Dataset):
             # Compute bag of words matrix
             if vectorizer is None:
                 d['vectorizer'] = CountVectorizer(**vectorizer_args)
-                d['M_features'] = d['vectorizer'].fit_transform(self.df["doc_clean"])
+                d['M_features'] = d['vectorizer'].fit_transform(df["doc_clean"])
             else:
                 d['vectorizer'] = vectorizer
-                d['M_features'] = d['vectorizer'].transform(self.df["doc_clean"])
+                d['M_features'] = d['vectorizer'].transform(df["doc_clean"])
             d['vocab'] = d['vectorizer'].get_feature_names_out()
             d['id2token'] = {
                 k: v for k, v in zip(range(0, len(d['vocab'])), d['vocab'])
@@ -122,7 +139,7 @@ class IdealPointNNDataset(Dataset):
                 d['V_embeddings'] = None
 
                 d['M_embeddings'] = bert_embeddings_from_list(
-                    self.df["doc"], sbert_model_to_load, batch_size, max_seq_length, self.device
+                    df["doc"], sbert_model_to_load, batch_size, max_seq_length, self.device
                 )
                 d['V_embeddings'] = bert_embeddings_from_list(
                     d['vocab'], sbert_model_to_load, batch_size, max_seq_length, self.device
@@ -133,25 +150,29 @@ class IdealPointNNDataset(Dataset):
             # M_features matrix for the encoder
             d['M_colnames'], d['M_features'] = self._transform_df(
                 "~ {}".format(" + ".join(["C({})".format(col) for col in columns])), 
-                self.df
+                df
                 )
 
             # Separate M_features matrix for each variable for the decoders
             for column in columns:
                 d[column] = {}
-                d[column]['M_colnames'], d[column]['M_features'] = self._transform_df("~ C({}) - 1".format(column), self.df)
+                d[column]['M_colnames'], d[column]['M_features'] = self._transform_df("~ C({}) - 1".format(column), df)
 
         elif modality == "vote":
 
-            d['M_features'] = np.array(self.df[columns])    
+            d['M_features'] = np.array(df[columns])    
             d['missing_values'] = np.isnan(d['M_features'])    
             d['M_features'] = np.nan_to_num(d['M_features'])
 
         # Extract content covariates matrix
         if content is not None:
             d['content_colnames'], d['M_content_covariates'] = self._transform_df(
-                content, self.df
+                content, df
             )
+            if self.time_col is not None:
+                d['M_content_covariates'] = d['M_content_covariates'][df[self.time_col] == self.time_value]
+            else:
+                d['M_content_covariates'] = d['M_content_covariates']
         
         self.data[modality] = d
 
@@ -207,7 +228,7 @@ class IdealPointNNDataset(Dataset):
                         d[mod][column] = {}
                         d[mod][column]["M_features"] = self.data[mod][column]['M_features'][i]
 
-            if d[mod].get("M_content_covariates", None) is not None:
+            if self.data[mod].get("M_content_covariates", None) is not None:
                 d[mod]["M_content_covariates"] = self.data[mod]['M_content_covariates'][i]
 
         if self.ideology is not None:

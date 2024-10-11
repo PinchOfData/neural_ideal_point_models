@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
+#!/usr/bin/env python
+# -*- encoding: utf-8 -*-
 
 import os
 import time
@@ -14,6 +16,8 @@ from autoencoders import EncoderMLP, DecoderMLP
 from predictors import Predictor
 from priors import NormalPrior
 from utils import MMD, compute_mmd_loss, top_k_indices_column
+import csv
+
 
 # Default parameters for the IdealPointNN model
 encoders = {
@@ -92,59 +96,32 @@ class IdealPointNN:
         w_prior=None,
         w_pred_loss=1,
         ckpt_folder="../ckpt",
+        model_name="model",
         ckpt=None,
         device=None,
         seed=42,
+        verbose=False,
+        eval_mode=False,
+        ignore_saves_loads=False,
     ):
-        """
-        Args:
-            train_datasets: a list of GTMCorpus objects
-            test_datasets: a list of GTMCorpus objects
-            n_dims: number of ideal point dimensions
-            update_prior: whether to update the prior at each epoch to account for ideology covariates.
-            alpha: parameter of the Dirichlet prior (only used if update_prior=False)
-            tol: tolerance threshold to stop the MLE of the Dirichlet prior (only used if update_prior=True)
-            encoders: dictionary with the parameters for the encoders. Each key is a modality and the value is a dictionary with the following keys:
-                encoder_input: type of input for the encoder. Either 'bow' or 'embeddings'.
-                encoder_hidden_layers: list with the size of the hidden layers for the encoder.
-                encoder_non_linear_activation: non-linear activation function for the encoder.
-                encoder_bias: whether to use bias in the encoder.
-            decoders: dictionary with the parameters for the decoders. Each key is a modality and the value is a dictionary with the following keys:
-                decoder_input: type of input for the decoder. Either 'bow' or 'embeddings'.
-                decoder_hidden_layers: list with the size of the hidden layers for the decoder.
-                decoder_non_linear_activation: non-linear activation function for the decoder.
-                decoder_bias: whether to use bias in the decoder.
-            predictor: dictionary with the parameters for the predictor. The dictionary has the following keys
-                predictor_type: type of predictor. Either 'classifier' or 'regressor'.
-                predictor_hidden_layers: list with the size of the hidden layers for the predictor.
-                predictor_non_linear_activation: non-linear activation function for the predictor.
-                predictor_bias: whether to use bias in the predictor.
-            num_epochs: number of epochs to train the model.
-            num_workers: number of workers for the data loaders.
-            batch_size: batch size for training.
-            learning_rate: learning rate for training.
-            dropout: dropout rate for training.
-            print_every_n_epochs: number of epochs between each print.
-            print_every_n_batches: number of batches between each print.
-            print_dims: whether to print the top words per dimension at each print.
-            print_content_covariates: whether to print the top words associated to each content covariate at each print.
-            log_every_n_epochs: number of epochs between each checkpoint.
-            patience: number of epochs to wait before stopping the training if the validation or training loss does not improve.
-            delta: threshold to stop the training if the validation or training loss does not improve.
-            w_prior: parameter to control the tightness of the encoder output with the document prior. If set to None, w_prior is chosen automatically.
-            w_pred_loss: parameter to control the weight given to the prediction task in the likelihood. Default is 1.
-            ckpt_folder: folder to save the checkpoints.
-            ckpt: checkpoint to load the model from.
-            device: device to use for training.
-            seed: random seed.
+        self.verbose = verbose
+        self.eval = eval_mode
+        self.model_name = model_name
+        self.train_datasets = train_datasets
+        self.device = device
+        self.ignore_saves_loads = ignore_saves_loads
 
-        """
-
+        # ici le modele check si il est en entrainement ou eval.
         if ckpt:
-            self.load_model(ckpt)
+            print('Loading model from checkpoint: ', ckpt)
 
+            if device == 'cpu':
+                self.load_model(ckpt, map_location=torch.device('cpu'))
+            
+            else:
+                self.load_model(ckpt) 
+            print('Model loaded successfully.')
         else:
-
             train_data = train_datasets[0]
 
             self.n_dims = n_dims
@@ -163,7 +140,6 @@ class IdealPointNN:
             self.predictor_non_linear_activation = self.predictor_params['predictor_non_linear_activation']
             self.predictor_bias = self.predictor_params['predictor_bias']
 
-            self.device = device
             self.batch_size = batch_size
             self.learning_rate = learning_rate
             self.num_epochs = num_epochs
@@ -309,6 +285,14 @@ class IdealPointNN:
                         self.ideology_covariate_size = ideology_covariate_size
                         self.labels_size = labels_size
 
+                        if self.verbose:
+                            print('=============================')
+                            print('t: ', t)
+                            print('features_size: ', features_size)
+                            print('ideology_covariate_size: ', ideology_covariate_size)
+                            print('labels_size: ', labels_size)
+                            print('input_size: ', self.input_size)
+                        
                         encoder_dims = [self.input_size]
                         encoder_dims.extend(encoder_hidden_layers)
                         encoder_dims.extend([n_dims])
@@ -432,19 +416,61 @@ class IdealPointNN:
             self.train_datasets = train_datasets
             self.test_datasets = test_datasets
 
+        if not(self.eval):
+            print('Model in training mode')
+            self.log_file = os.path.join(self.ckpt_folder, "training_log.csv")
+            with open(self.log_file, 'w', newline='') as f:
+                writer = csv.writer(f) 
+                writer.writerow(["epoch", "training_loss", "validation_loss", "time"])
             self.train()
+        else:
+            print('Model in evaluation mode')
+            self.set_eval_mode()
+
+    def set_eval_mode(self):
+        for modality in self.modalities:
+            if modality == 'text':
+                self.Encoders[modality].eval()
+                self.Decoders[modality].eval()
+            elif modality in ['vote', 'discrete_choice']:
+                for t in self.Encoders[modality]:
+                    self.Encoders[modality][t].eval()
+                    if modality == 'vote':
+                        self.Decoders[modality][t].eval()
+                    else:
+                        for k in self.Decoders[modality][t]:
+                            self.Decoders[modality][t][k].eval()
+        if self.labels_size != 0:
+            self.predictor.eval()
 
     def train(self):
         """
-        Train the model.
+        Train the model over multiple epochs, updating the model parameters based on the training data.
+        
+        This function handles the training loop, including loading the training and test datasets, 
+        performing forward and backward passes, and logging the training and validation losses. 
+        It also manages the saving of the best model based on validation loss and updates the 
+        prior parameters if required. The training process is controlled by the number of epochs 
+        specified, and the function ensures that the model is trained efficiently using mini-batch 
+        gradient descent.
+
+        Attributes:
+            self.epochs (int): The current epoch number.
+            self.num_epochs (int): The total number of epochs to train the model.
+            self.ckpt_folder (str): The directory where model checkpoints are saved.
+            self.log_every_n_epochs (int): Frequency of logging training progress.
+            self.update_prior (bool): Flag indicating whether to update the prior parameters.
         """
 
         counter = 0
         best_loss = np.Inf
         best_epoch = -1
-        self.save_model("{}/best_model.ckpt".format(self.ckpt_folder))
+        best_state = None
+        self.save_model("{}/best_model_{}.ckpt".format(self.ckpt_folder, self.model_name))
         
         for epoch in range(self.epochs, self.num_epochs):
+
+            start_time = time.time()
 
             train_data_loaders = []
             for train_data in self.train_datasets:
@@ -471,9 +497,12 @@ class IdealPointNN:
 
             if self.test_datasets is not None:
                 validation_loss = self.epoch(test_data_loaders, validation=True)
+            else:
+                validation_loss = -1
 
             if (epoch + 1) % self.log_every_n_epochs == 0:
                 save_name = f'{self.ckpt_folder}/IdealPointNN_K{self.n_dims}_{self.predictor_type}_{time.strftime("%Y-%m-%d-%H-%M", time.localtime())}_{self.epochs+1}.ckpt'
+                # a la fin d'une epoch on enregistrait systématique le modèle
                 #self.save_model(save_name)
 
             if self.update_prior:
@@ -489,7 +518,8 @@ class IdealPointNN:
                 if validation_loss + self.delta < best_loss:
                     best_loss = validation_loss
                     best_epoch = self.epochs
-                    self.save_model("{}/best_model.ckpt".format(self.ckpt_folder))
+                    best_state = self.get_model_state()
+                    #self.save_model("{}/best_model_{}.ckpt".format(self.ckpt_folder, self.model_name))
                     counter = 0
                 else:
                     counter += 1
@@ -497,7 +527,8 @@ class IdealPointNN:
                 if training_loss + self.delta < best_loss:
                     best_loss = training_loss
                     best_epoch = self.epochs
-                    self.save_model("{}/best_model.ckpt".format(self.ckpt_folder))
+                    best_state = self.get_model_state()
+                    #self.save_model("{}/best_model_{}.ckpt".format(self.ckpt_folder, self.model_name))
                     counter = 0
                 else:
                     counter += 1
@@ -508,11 +539,70 @@ class IdealPointNN:
                         self.epochs + 1, best_epoch + 1
                     )
                 )
-                ckpt = "{}/best_model.ckpt".format(self.ckpt_folder)
-                self.load_model(ckpt)
+                #ckpt = "{}/best_model_{}.ckpt".format(self.ckpt_folder, self.model_name)
+                self.load_model_state(best_state)
                 break
 
             self.epochs += 1
+
+            # Log the training and validation loss to CSV
+            end_time = time.time()
+            epoch_duration = end_time - start_time
+            with open(self.log_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([self.epochs, training_loss, validation_loss, epoch_duration])
+
+
+        # tout a la fin de l'entrainement, on charge les meilleurs paramètres du modèles (depuis best_state
+        # et on sauvegarde le modèle une seule fois
+        if best_state is not None:
+            self.load_model_state(best_state)
+            self.save_model("{}/best_model_{}.ckpt".format(self.ckpt_folder, self.model_name))
+
+
+    def get_model_state(self):
+        # recupère les paramètres du modèle
+        state = {
+            "Encoders": {},
+            "Decoders": {},
+            "predictor": None,
+            "optimizer": self.optimizer.state_dict(),
+            "epochs": self.epochs,
+        }
+        for modality in self.modalities:
+            if modality == 'text':
+                state["Encoders"][modality] = self.Encoders[modality].state_dict()
+                state["Decoders"][modality] = self.Decoders[modality].state_dict()
+            elif modality in ['vote', 'discrete_choice']:
+                state["Encoders"][modality] = {}
+                state["Decoders"][modality] = {}
+                for t in self.Encoders[modality].keys():
+                    state["Encoders"][modality][t] = self.Encoders[modality][t].state_dict()
+                    state["Decoders"][modality][t] = self.Decoders[modality][t].state_dict()    
+        
+        if self.labels_size != 0:
+            state["predictor"] = self.predictor.state_dict()
+
+        return state    
+                    
+
+    def load_model_state(self, state):
+        # charge les paramètres du modèle à partir d'un état donné
+        for modality in self.modalities:
+            if modality == 'text':
+                self.Encoders[modality].load_state_dict(state["Encoders"][modality])
+                self.Decoders[modality].load_state_dict(state["Decoders"][modality])
+            elif modality in ['vote', 'discrete_choice']:
+                for t in state["Encoders"][modality].keys():
+                    self.Encoders[modality][t].load_state_dict(state["Encoders"][modality][t])
+                    self.Decoders[modality][t].load_state_dict(state["Decoders"][modality][t])
+        
+        if self.labels_size != 0 and state["predictor"] is not None:
+            self.predictor.load_state_dict(state["predictor"])
+
+        self.optimizer.load_state_dict(state["optimizer"])
+        self.epochs = state["epochs"]
+        
 
     def epoch(self, data_loaders, validation=False):
         """
@@ -560,6 +650,7 @@ class IdealPointNN:
 
                 t = int(data['t'][0])
 
+
                 # Choose at random one modality to encode in and one modality to decode in (fast)
                 enc_mod = random.choice(self.modalities)
                 dec_mod = random.choice(self.modalities) 
@@ -582,7 +673,11 @@ class IdealPointNN:
                 
                 for k,v in data.items():
                     if k not in self.modalities:
-                        data[k] = v.to(self.device)
+                        if isinstance(v, torch.Tensor):
+                            data[k] = v.clone().detach().to(self.device)
+                        else:
+                            data[k] = torch.tensor(v).to(self.device)
+                        
 
                 bows = data[enc_mod].get("M_features", None)
                 bows = bows.reshape(bows.shape[0], -1)
@@ -598,9 +693,17 @@ class IdealPointNN:
                 else:
                     x_input = bows
 
+                if self.verbose:
+                    print('------------------------')
+                    print('enc_mod: ', enc_mod)
+                    print('dec_mod: ', dec_mod)
+                    print('t: ', t)
+                    print('x_input0: ', x_input.shape)
                 # Get theta and compute reconstruction loss
                 if ideology_covariates is not None and self.encoder_include_ideology_covariates:
                     x_input = torch.cat((x_input, ideology_covariates), 1)
+
+                if self.verbose: print('x_input1: ', x_input.shape)
 
                 x_input = x_input.float()
                 
@@ -634,7 +737,22 @@ class IdealPointNN:
                     x_output = data[dec_mod]["M_features"]
                     x_output = x_output.reshape(x_output.shape[0], -1)
                     x_recon = self.Decoders[dec_mod](theta)
-                    reconstruction_loss = F.cross_entropy(x_recon, x_output)
+                    #reconstruction_loss = F.cross_entropy(x_recon, x_output)
+                    x_recon = torch.sigmoid(x_recon) #added pierre
+                    
+                    try:
+                        #reconstruction_loss = nn.BCELoss()(x_recon, x_output) #added pierre
+                        reconstruction_loss = nn.BCEWithLogitsLoss()(x_recon, x_output) #added pierre
+                    except Exception as e:
+                        print('Error in BCELoss: ', e)
+                        print('max input: ', x_output.max())
+                        print('min input: ', x_output.min())
+                        print('max recon: ', x_recon.max().cpu().detach().numpy())
+                        print('min recon: ', x_recon.min().cpu().detach().numpy())
+                        # if x_recon contains NaNs, prints the number of NaNs
+                        print('Number of NaNs in x_recon: ', torch.sum(torch.isnan(x_recon)).cpu().detach().numpy())
+                        
+
                 elif dec_mod == 'vote':
                     x_recon = x_recon_2
                     criterion = nn.BCEWithLogitsLoss()
@@ -658,7 +776,7 @@ class IdealPointNN:
                 if target_labels is not None:
                     predictions = self.predictor(theta, prediction_covariates)
                     if self.predictor_type == "classifier":
-                        target_labels = target_labels.squeeze().to(torch.int64)
+                        target_labels = target_labels.squeeze()#.to(torch.int64)
                         prediction_loss = F.cross_entropy(predictions, target_labels)
                     elif self.predictor_type == "regressor":
                         prediction_loss = F.mse_loss(predictions, target_labels)
@@ -704,7 +822,7 @@ class IdealPointNN:
             if self.content_covariate_size != 0 and self.print_content_covariates:
                 pass
 
-        return sum(epochloss_lst)
+        return sum(epochloss_lst)/len(epochloss_lst)
     
 
     def get_ideal_points(self, datasets, modality=None):
@@ -773,27 +891,21 @@ class IdealPointNN:
         return ideal_points
 
     def save_model(self, save_name):
+        if self.ignore_saves_loads:
+            return None
+        
         encoders = {}
         decoders = {}
         for modality in self.modalities:
             if modality == 'text':
                 encoders[modality] = self.Encoders[modality].state_dict()
                 decoders[modality] = self.Decoders[modality].state_dict()
-            elif modality == 'vote':
+            elif modality in ['vote', 'discrete_choice']:
                 encoders[modality] = {}
                 decoders[modality] = {}
                 for t in self.Encoders[modality].keys():
                     encoders[modality][t] = self.Encoders[modality][t].state_dict()
                     decoders[modality][t] = self.Decoders[modality][t].state_dict()
-            elif modality == 'discrete_choice':
-                encoders[modality] = {}
-                decoders[modality] = {}
-                for t in self.Encoders[modality].keys():
-                    encoders[modality][t] = self.Encoders[modality][t].state_dict()
-                    decoders[modality][t] = {}
-                    for k2,v2 in self.Decoders[modality][t].items():
-                        if k2 not in ["M_features", "M_colnames"]:
-                            decoders[modality][t][k2] = v2.state_dict()
 
         if self.labels_size != 0:
             predictor_state_dict = self.predictor.state_dict()
@@ -814,84 +926,153 @@ class IdealPointNN:
             checkpoint["predictor"] = predictor_state_dict
         checkpoint["optimizer"] = optimizer_state_dict
 
+        print(f"Saving model to {save_name}")
         torch.save(checkpoint, save_name)
 
-    def load_model(self, ckpt):
+    def load_model(self, ckpt, map_location=None):
+        #
         """
         Helper function to load a GTM model.
         """
-        ckpt = torch.load(ckpt)
+        ckpt = torch.load(ckpt, map_location=map_location)
+        current_eval_status = self.eval # ici on garde l'ancien status de eval
         for key, value in ckpt.items():
-            if key not in ["Encoders", "Decoders", "predictor", "optimizer"]:
+            if key not in ["Encoders", "Decoders", "predictor", "optimizer", "eval", 'input_size', 'bow_size',
+                           'verbose', 'device']:
                 setattr(self, key, value)
+                if self.verbose:
+                    print(f"Loading {key} from checkpoint")
+        self.eval = current_eval_status #on lui remet la variable eval pour empecher l'ecrasement
 
+        # Load Encoders
         if not hasattr(self, "Encoders"):
-
-            for modality in self.modalities:
-
-                if self.encoder_include_ideology_covariates:
-                    encoder_dims = [self.input_size + self.ideology_covariate_size]
-                else:
-                    encoder_dims = [self.input_size]
-                encoder_dims.extend(self.encoder_hidden_layers)
-                encoder_dims.extend([self.n_dims])
-
-                self.Encoders[modality] = EncoderMLP(
-                    encoder_dims=encoder_dims,
-                    encoder_non_linear_activation=self.encoder_non_linear_activation,
-                    encoder_bias=self.encoder_bias,
-                    dropout=self.dropout,
-                ).to(self.device)
-
+            self.Encoders = {}
+        for modality in self.modalities:
+            if modality == 'text':
+                if modality not in self.Encoders:
+                    self.Encoders[modality] = self._create_encoder(modality)
                 self.Encoders[modality].load_state_dict(ckpt["Encoders"][modality])
+            elif modality in ['vote', 'discrete_choice']:
+                self.Encoders[modality] = {}
+                for t, state_dict in ckpt["Encoders"][modality].items():
+                    if t not in self.Encoders[modality]:
+                        
+                        t_idx = list(ckpt["Encoders"][modality].keys()).index(t)
+                        # On garde une trace de l'index temporel (t_idx)
+                        assert self.train_datasets[t_idx].t == t, f"t: {t} != self.train_datasets[t_idx].t: {self.train_datasets[t_idx].t}"
+                        
+                        features_size = self.train_datasets[t_idx].data[modality]['M_features'].shape[1]
+                        bow_size = features_size
+                        input_size = features_size
 
+                        if self.verbose:
+                            print(f'{t} not in self.Encoders[{modality}], creating it')
+                        self.Encoders[modality][t] = self._create_encoder(modality, input_size)
+                    self.Encoders[modality][t].load_state_dict(state_dict)
+
+        # Load Decoders
         if not hasattr(self, "Decoders"):
-
-            for modality in self.modalities:
-
-                decoder_dims = [self.n_dims + self.content_covariate_size]
-                decoder_dims.extend(self.decoder_hidden_layers)
-                decoder_dims.extend([self.bow_size])
-
-                self.Decoders[modality] = DecoderMLP(
-                    decoder_dims=decoder_dims,
-                    decoder_non_linear_activation=self.decoder_non_linear_activation,
-                    decoder_bias=self.decoder_bias,
-                    dropout=self.dropout,
-                ).to(self.device)
-
+            self.Decoders = {}
+        for modality in self.modalities:
+            if modality == 'text':
+                if modality not in self.Decoders:
+                    self.Decoders[modality] = self._create_decoder(modality)
                 self.Decoders[modality].load_state_dict(ckpt["Decoders"][modality])
+            elif modality == 'vote':
+                self.Decoders[modality] = {}
+                for t, state_dict in ckpt["Decoders"][modality].items():
+                    if t not in self.Decoders[modality]:
+                        
+                        t_idx = list(ckpt["Decoders"][modality].keys()).index(t)
+                        assert self.train_datasets[t_idx].t == t, f"t: {t} != self.train_datasets[t_idx].t: {self.train_datasets[t_idx].t}"
 
+                        features_size = self.train_datasets[t_idx].data[modality]['M_features'].shape[1]
+                        bow_size = features_size
+                        input_size = features_size
+
+                        if self.verbose:
+                            print(f'{t} not in self.Decoders[{modality}], creating it')
+                        self.Decoders[modality][t] = self._create_decoder(modality, bow_size)
+                    self.Decoders[modality][t].load_state_dict(state_dict)
+            elif modality == 'discrete_choice':
+                self.Decoders[modality] = {}
+                for t, var_dict in ckpt["Decoders"][modality].items():
+                    self.Decoders[modality][t] = {}
+                    for k, state_dict in var_dict.items():
+                        if k not in self.Decoders[modality][t]:
+                            self.Decoders[modality][t][k] = self._create_decoder(modality)
+                        self.Decoders[modality][t][k].load_state_dict(state_dict)
+
+        # Load predictor
         if self.labels_size != 0:
             if not hasattr(self, "predictor"):
-                self.predictor = Predictor(
-                    predictor_dims=[self.n_dims + self.prediction_covariate_size]
-                    + self.predictor_hidden_layers
-                    + [self.labels_size],
-                    predictor_non_linear_activation=self.predictor_non_linear_activation,
-                    predictor_bias=self.predictor_bias,
-                    dropout=self.dropout,
-                ).to(self.device)
+                self.predictor = self._create_predictor()
             self.predictor.load_state_dict(ckpt["predictor"])
 
+        # Load optimizer
         if not hasattr(self, "optimizer"):
-
-            list_of_encoder_parameters = [list(self.Encoders[modality].parameters()) for modality in self.modalities]
-            list_of_decoder_parameters = [list(self.Decoders[modality].parameters()) for modality in self.modalities]
-
-            if self.labels_size != 0: 
-                list_of_predictor_parameters = list(self.predictor.parameters())
-                self.optimizer = torch.optim.Adam(
-                    list_of_encoder_parameters + list_of_decoder_parameters + list_of_predictor_parameters,
-                    lr=self.learning_rate,
-                )
-            else:
-                self.optimizer = torch.optim.Adam(
-                    list_of_encoder_parameters + list_of_decoder_parameters, 
-                    lr=self.learning_rate
-                )
-
+            self.optimizer = self._create_optimizer()
             self.optimizer.load_state_dict(ckpt["optimizer"])
+
+    def _create_encoder(self, 
+                        modality,
+                        input_size,):
+        
+        encoder_dims = [input_size + self.ideology_covariate_size] if self.encoder_include_ideology_covariates else [input_size]
+
+        encoder_dims.extend(self.encoder_params[modality]['encoder_hidden_layers'])
+        encoder_dims.extend([self.n_dims])
+        if self.verbose:
+            print('New, created encoder_dims: ', encoder_dims)
+        return EncoderMLP(
+            encoder_dims=encoder_dims,
+            encoder_non_linear_activation=self.encoder_params[modality]['encoder_non_linear_activation'],
+            encoder_bias=self.encoder_params[modality]['encoder_bias'],
+            dropout=self.dropout,
+        ).to(self.device)
+
+    def _create_decoder(self, modality,
+                        bow_size):
+        
+        decoder_dims = [self.n_dims + self.content_covariate_size[modality]]
+        decoder_dims.extend(self.decoder_params[modality]['decoder_hidden_layers'])
+        decoder_dims.extend([bow_size])
+        return DecoderMLP(
+            decoder_dims=decoder_dims,
+            decoder_non_linear_activation=self.decoder_params[modality]['decoder_non_linear_activation'],
+            decoder_bias=self.decoder_params[modality]['decoder_bias'],
+            dropout=self.dropout,
+        ).to(self.device)
+
+    def _create_predictor(self):
+        predictor_dims = [self.n_dims + self.train_datasets[0].M_prediction_covariates.shape[1]]
+        predictor_dims.extend(self.predictor_hidden_layers)
+        predictor_dims.extend([self.labels_size])
+        return Predictor(
+            predictor_dims=predictor_dims,
+            predictor_non_linear_activation=self.predictor_non_linear_activation,
+            predictor_bias=self.predictor_bias,
+            dropout=self.dropout,
+        ).to(self.device)
+
+    def _create_optimizer(self):
+        params = []
+        for modality in self.modalities:
+            if modality == 'text':
+                params.extend(list(self.Encoders[modality].parameters()))
+                params.extend(list(self.Decoders[modality].parameters()))
+            elif modality in ['vote', 'discrete_choice']:
+                for t in self.Encoders[modality]:
+                    params.extend(list(self.Encoders[modality][t].parameters()))
+                for t in self.Decoders[modality]:
+                    if modality == 'vote':
+                        params.extend(list(self.Decoders[modality][t].parameters()))
+                    else:
+                        for k in self.Decoders[modality][t]:
+                            params.extend(list(self.Decoders[modality][t][k].parameters()))
+        if self.labels_size != 0:
+            params.extend(list(self.predictor.parameters()))
+        return torch.optim.Adam(params, lr=self.learning_rate)
 
     def to(self, device):
         """

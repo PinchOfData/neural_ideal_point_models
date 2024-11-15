@@ -85,7 +85,7 @@ class IdealPointNNDataset(Dataset):
             self.df = df
 
         if time_value is None:
-            self.t = 1
+            self.t = 0
         else:
             self.t = time_value
 

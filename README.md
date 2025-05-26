@@ -14,7 +14,7 @@ The Neural Ideal Point Model present various advantages:
 
 ## References
 
-The Neural Ideal Point Model, Germain Gauthier and Hugo Subtil, *coming soon*
+The Neural Ideal Point Model, Germain Gauthier, Hugo Subtil, and Philine Widmer, *coming soon*
 
 ## Disclaimer
 
